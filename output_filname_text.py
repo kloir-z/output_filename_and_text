@@ -1,39 +1,80 @@
 import os
 import json
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
+from pathlib import Path
 
 SETTINGS_FILE = "settings.json"
 HISTORY_LIMIT = 20
 
 
-def get_files_and_content(directory, extensions, exclude_files):
+def read_gitignore(directory):
+    gitignore_path = os.path.join(directory, ".gitignore")
+    if not os.path.exists(gitignore_path):
+        return set()
+
+    ignored_patterns = set()
+    with open(gitignore_path, "r", encoding="utf8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ignored_patterns.add(line)
+    return ignored_patterns
+
+
+def should_ignore_file(file_path, ignored_patterns):
+    if not ignored_patterns:
+        return False
+
+    path = Path(file_path)
+
+    for pattern in ignored_patterns:
+        if path.match(pattern) or any(parent.match(pattern) for parent in path.parents):
+            return True
+    return False
+
+
+def get_files_and_content(directory, extensions, exclude_files, respect_gitignore=False):
     output = []
+    ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
+
     for root, dirs, files in os.walk(directory):
+        if ".git" in dirs:
+            dirs.remove(".git")
+
         for filename in files:
-            extension = os.path.splitext(filename)[1].lstrip(".")  # Get the file extension
+            if filename == ".gitignore":
+                continue
+
+            extension = os.path.splitext(filename)[1].lstrip(".")
             if extension not in extensions and "*" not in extensions:
                 continue
             if os.path.basename(filename) in exclude_files:
                 continue
+
             file_path = os.path.join(root, filename)
-            relative_path = os.path.relpath(file_path, directory)  # Get the relative path
+            relative_path = os.path.relpath(file_path, directory)
+
+            if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
+                continue
+
             output.append(("title", "########\n"))
             output.append(("title", f"# {relative_path}\n"))
             output.append(("title", "########\n"))
-            with open(file_path, "r", encoding="utf8") as f:
-                content = f.read()
-                output.append(("content", content))
-                output.append(("content", "\n\n"))
+            try:
+                with open(file_path, "r", encoding="utf8") as f:
+                    content = f.read()
+                    output.append(("content", content))
+                    output.append(("content", "\n\n"))
+            except UnicodeDecodeError:
+                output.append(("content", f"[Binary file or encoding error: {relative_path}]\n\n"))
+
     return output
 
 
-def save_settings(directory, extensions, exclude_files):
-    new_setting = {
-        "directory": directory,
-        "extensions": extensions,
-        "exclude_files": exclude_files,
-    }
+def save_settings(directory, extensions, exclude_files, respect_gitignore):
+    new_setting = {"directory": directory, "extensions": extensions, "exclude_files": exclude_files, "respect_gitignore": respect_gitignore}
+
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "r", encoding="utf8") as f:
             try:
@@ -43,12 +84,9 @@ def save_settings(directory, extensions, exclude_files):
     else:
         history = []
 
-    # If the directory already exists in the history, remove it
     history = [setting for setting in history if setting["directory"] != directory]
-
-    # Add the new settings at the beginning
     history.insert(0, new_setting)
-    history = history[:HISTORY_LIMIT]  # Limit the history to the last 20 entries
+    history = history[:HISTORY_LIMIT]
 
     with open(SETTINGS_FILE, "w", encoding="utf8") as f:
         json.dump(history, f)
@@ -66,107 +104,125 @@ def load_settings():
     return []
 
 
-def show_result():
-    directory = dir_entry.get()
-    extensions = ext_entry.get().split(",")
-    exclude_files = exclude_entry.get().split(",")
+class FileContentViewer:
+    def __init__(self, root):
+        self.root = root
+        self.root.geometry("1200x800")
+        self.settings = load_settings()
 
-    # Convert to list and remove "." and "*"
-    extensions = [ext.strip().lstrip("*.") for ext in extensions]
-    exclude_files = [file.strip() for file in exclude_files]
+        self.create_frames()
+        self.create_history_section()
+        self.create_input_section()
+        self.create_text_area()
 
-    result = get_files_and_content(directory, extensions, exclude_files)
-    text_area.delete(1.0, tk.END)
+        if self.settings:
+            self.select_history(None)
 
-    for tag, content in result:
-        end_index = text_area.index(tk.INSERT)  # Current end index
-        text_area.insert(tk.INSERT, content)
-        start_index = text_area.index(tk.INSERT)  # New end index
-        text_area.tag_add(tag, end_index, start_index)
-        if tag == "title":
-            text_area.tag_config(tag, background="lightgray")  # Or whatever color you want
+    def create_frames(self):
+        self.history_frame = tk.Frame(self.root)
+        self.history_frame.pack(fill="x", padx=5, pady=5)
 
-    global settings
-    settings = save_settings(directory, extensions, exclude_files)
+        self.input_frame = tk.Frame(self.root)
+        self.input_frame.pack(fill="x", padx=5, pady=5)
 
-    update_dropdown()
+        self.text_frame = tk.Frame(self.root)
+        self.text_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+    def create_history_section(self):
+        history_label = tk.Label(self.history_frame, text="History:")
+        history_label.pack(side=tk.LEFT)
+
+        self.history_var = tk.StringVar(self.root)
+        if self.settings:
+            self.history_var.set("Select from history")
+
+        style = ttk.Style()
+        style.configure("History.TCombobox", width=50)
+
+        self.history_combo = ttk.Combobox(self.history_frame, textvariable=self.history_var, style="History.TCombobox", state="readonly")  # コンボボックスを読み取り専用に設定
+        self.history_combo.pack(side=tk.LEFT, fill="x", expand=True, padx=(5, 0))
+        self.update_dropdown()
+
+        # コンボボックスのバインディングを追加
+        self.history_combo.bind("<<ComboboxSelected>>", self.select_history)
+        self.history_combo.bind("<Button-1>", lambda e: self.history_combo.event_generate("<<ComboboxSelected>>"))
+
+    def create_input_section(self):
+        self.btn = tk.Button(self.input_frame, text="Get Files and Content", command=self.show_result)
+        self.btn.pack(side=tk.LEFT)
+
+        dir_label = tk.Label(self.input_frame, text="Directory:")
+        dir_label.pack(side=tk.LEFT)
+
+        self.dir_entry = tk.Entry(self.input_frame, width=30)
+        self.dir_entry.pack(side=tk.LEFT, padx=(2, 10))
+
+        ext_label = tk.Label(self.input_frame, text="Extensions:")
+        ext_label.pack(side=tk.LEFT)
+
+        self.ext_entry = tk.Entry(self.input_frame, width=20)
+        self.ext_entry.pack(side=tk.LEFT, padx=(2, 10))
+
+        exclude_label = tk.Label(self.input_frame, text="Exclude:")
+        exclude_label.pack(side=tk.LEFT)
+
+        self.exclude_entry = tk.Entry(self.input_frame, width=20)
+        self.exclude_entry.pack(side=tk.LEFT, padx=(2, 10))
+
+        self.gitignore_var = tk.BooleanVar()
+        self.gitignore_check = tk.Checkbutton(self.input_frame, text="Respect .gitignore", variable=self.gitignore_var)
+        self.gitignore_check.pack(side=tk.LEFT, padx=(0, 10))
+
+    def create_text_area(self):
+        self.text_area = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD)
+        self.text_area.pack(fill="both", expand=True)
+
+    def show_result(self):
+        directory = self.dir_entry.get()
+        extensions = [ext.strip().lstrip("*.") for ext in self.ext_entry.get().split(",")]
+        exclude_files = [file.strip() for file in self.exclude_entry.get().split(",")]
+        respect_gitignore = self.gitignore_var.get()
+
+        result = get_files_and_content(directory, extensions, exclude_files, respect_gitignore)
+
+        self.text_area.delete(1.0, tk.END)
+
+        for tag, content in result:
+            end_index = self.text_area.index(tk.INSERT)
+            self.text_area.insert(tk.INSERT, content)
+            start_index = self.text_area.index(tk.INSERT)
+            self.text_area.tag_add(tag, end_index, start_index)
+            if tag == "title":
+                self.text_area.tag_config(tag, background="lightgray")
+
+        self.settings = save_settings(directory, extensions, exclude_files, respect_gitignore)
+        self.update_dropdown()
+
+    def select_history(self, event):
+        selected_dir = self.history_var.get()
+        for setting in self.settings:
+            if setting["directory"] == selected_dir:
+                self.dir_entry.delete(0, tk.END)
+                self.dir_entry.insert(0, setting["directory"])
+
+                self.ext_entry.delete(0, tk.END)
+                self.ext_entry.insert(0, ", ".join(setting["extensions"]))
+
+                self.exclude_entry.delete(0, tk.END)
+                self.exclude_entry.insert(0, ", ".join(setting["exclude_files"]))
+
+                self.gitignore_var.set(setting.get("respect_gitignore", False))
+
+    def update_dropdown(self):
+        if not self.settings:
+            self.history_combo["values"] = ["No history"]
+            return
+
+        self.history_combo["values"] = [s["directory"] for s in self.settings]
 
 
-def select_history(*args):
-    selected_setting = history_var.get()
-    for setting in settings:
-        if setting["directory"] == selected_setting:
-            dir_entry.delete(0, tk.END)
-            dir_entry.insert(0, setting["directory"])
-
-            ext_entry.delete(0, tk.END)
-            ext_entry.insert(0, ", ".join(setting["extensions"]))
-
-            exclude_entry.delete(0, tk.END)
-            exclude_entry.insert(0, ", ".join(setting["exclude_files"]))
-
-
-def update_dropdown():
-    history_dropdown["menu"].delete(0, "end")
-    # メニューコマンドを追加するが、表示は 'history' を維持
-    for setting in settings:
-        history_dropdown["menu"].add_command(
-            label=setting["directory"],
-            command=lambda value=setting["directory"]: history_var.set(value),
-        )
-
-
-# Tkinterウィンドウとウィジェットの初期化
-root = tk.Tk()
-root.geometry("1200x800")
-
-input_frame = tk.Frame(root, width=1200, height=50)
-input_frame.pack_propagate(0)  # Don't shrink
-input_frame.pack(anchor="w")
-
-# ラベルとエントリーの定義
-dir_label = tk.Label(input_frame, text="Directory:")
-dir_label.pack(side=tk.LEFT)
-
-dir_entry = tk.Entry(input_frame, width=30)
-dir_entry.pack(side=tk.LEFT)
-
-ext_label = tk.Label(input_frame, text="Extensions:")
-ext_label.pack(side=tk.LEFT)
-
-ext_entry = tk.Entry(input_frame)
-ext_entry.pack(side=tk.LEFT)
-
-exclude_label = tk.Label(input_frame, text="Exclude Files:")
-exclude_label.pack(side=tk.LEFT)
-
-exclude_entry = tk.Entry(input_frame, width=50)
-exclude_entry.pack(expand=True, fill=tk.X, side=tk.LEFT)
-
-# ボタンの定義
-btn = tk.Button(input_frame, text="Get Files and Content", command=show_result)
-btn.pack(side=tk.LEFT)
-
-# スクロール可能なテキストエリアの定義
-text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD)
-text_area.pack(fill="both", expand=True)
-
-# 設定のロード
-settings = load_settings()
-
-# ドロップダウンメニューの更新とイベントハンドラの設定
-history_var = tk.StringVar(root)
-history_var.trace_add("write", select_history)
-if settings:
-    history_var.set("history")
-
-history_dropdown = tk.OptionMenu(input_frame, history_var, "No history")
-history_dropdown.config(width=10)
-history_dropdown.pack(side=tk.LEFT)
-update_dropdown()
-
-# 初期設定の適用
-if settings:
-    select_history(None)  # 初期選択を行う
-
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.title("File Content Viewer")
+    app = FileContentViewer(root)
+    root.mainloop()
