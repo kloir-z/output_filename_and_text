@@ -3,6 +3,7 @@ import json
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 from pathlib import Path
+import fnmatch
 
 SETTINGS_FILE = "settings.json"
 HISTORY_LIMIT = 20
@@ -34,9 +35,51 @@ def should_ignore_file(file_path, ignored_patterns):
     return False
 
 
-def get_files_and_content(directory, extensions, exclude_files, respect_gitignore=False):
+def matches_pattern(filename, patterns, is_exclude=False):
+    """
+    ファイル名がパターンのいずれかにマッチするかチェックする
+    patterns: カンマ区切りのパターン文字列のリスト
+    is_exclude: 除外パターンかどうか（True の場合、空リストは何もマッチしない）
+    """
+    if is_exclude and not patterns:
+        return False
+
+    if not is_exclude and not patterns:
+        return True
+
+    if "*" in patterns:
+        return True
+
+    file_ext = os.path.splitext(filename)[1].lstrip(".")
+
+    for pattern in patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+
+        if any(c in pattern for c in "*?."):
+            if fnmatch.fnmatch(filename, pattern):
+                return True
+        else:
+            if pattern == file_ext:
+                return True
+            if not file_ext and pattern == filename:
+                return True
+
+    return False
+
+
+def get_files_and_content(
+    directory, include_patterns, exclude_patterns, respect_gitignore=False
+):
     output = []
     ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
+
+    include_patterns = [p.strip() for p in include_patterns if p.strip()]
+    exclude_patterns = [p.strip() for p in exclude_patterns if p.strip()]
+
+    print(f"Include patterns: {include_patterns}")
+    print(f"Exclude patterns: {exclude_patterns}")
 
     for root, dirs, files in os.walk(directory):
         if ".git" in dirs:
@@ -46,17 +89,25 @@ def get_files_and_content(directory, extensions, exclude_files, respect_gitignor
             if filename == ".gitignore":
                 continue
 
-            extension = os.path.splitext(filename)[1].lstrip(".")
-            if extension not in extensions and "*" not in extensions:
+            if not matches_pattern(filename, include_patterns, is_exclude=False):
+                print(
+                    f"Skipping {filename} - doesn't match include patterns"
+                )
                 continue
-            if os.path.basename(filename) in exclude_files:
+            if matches_pattern(filename, exclude_patterns, is_exclude=True):
+                print(f"Skipping {filename} - matches exclude patterns")
                 continue
 
             file_path = os.path.join(root, filename)
             relative_path = os.path.relpath(file_path, directory)
 
-            if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
+            if respect_gitignore and should_ignore_file(
+                relative_path, ignored_patterns
+            ):
+                print(f"Skipping {filename} - ignored by .gitignore")
                 continue
+
+            print(f"Including file: {filename}")
 
             output.append(("title", "########\n"))
             output.append(("title", f"# {relative_path}\n"))
@@ -67,13 +118,23 @@ def get_files_and_content(directory, extensions, exclude_files, respect_gitignor
                     output.append(("content", content))
                     output.append(("content", "\n\n"))
             except UnicodeDecodeError:
-                output.append(("content", f"[Binary file or encoding error: {relative_path}]\n\n"))
+                output.append(
+                    ("content", f"[Binary file or encoding error: {relative_path}]\n\n")
+                )
 
     return output
 
 
-def save_settings(directory, extensions, exclude_files, respect_gitignore):
-    new_setting = {"directory": directory, "extensions": extensions, "exclude_files": exclude_files, "respect_gitignore": respect_gitignore}
+def save_settings(directory, include_patterns, exclude_patterns, respect_gitignore):
+    """
+    設定を保存する
+    """
+    new_setting = {
+        "directory": directory,
+        "include_patterns": include_patterns,
+        "exclude_patterns": exclude_patterns,
+        "respect_gitignore": respect_gitignore,
+    }
 
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "r", encoding="utf8") as f:
@@ -95,6 +156,9 @@ def save_settings(directory, extensions, exclude_files, respect_gitignore):
 
 
 def load_settings():
+    """
+    保存された設定を読み込む
+    """
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "r", encoding="utf8") as f:
             try:
@@ -139,16 +203,25 @@ class FileContentViewer:
         style = ttk.Style()
         style.configure("History.TCombobox", width=50)
 
-        self.history_combo = ttk.Combobox(self.history_frame, textvariable=self.history_var, style="History.TCombobox", state="readonly")  # コンボボックスを読み取り専用に設定
+        self.history_combo = ttk.Combobox(
+            self.history_frame,
+            textvariable=self.history_var,
+            style="History.TCombobox",
+            state="readonly",
+        )
         self.history_combo.pack(side=tk.LEFT, fill="x", expand=True, padx=(5, 0))
         self.update_dropdown()
 
-        # コンボボックスのバインディングを追加
         self.history_combo.bind("<<ComboboxSelected>>", self.select_history)
-        self.history_combo.bind("<Button-1>", lambda e: self.history_combo.event_generate("<<ComboboxSelected>>"))
+        self.history_combo.bind(
+            "<Button-1>",
+            lambda e: self.history_combo.event_generate("<<ComboboxSelected>>"),
+        )
 
     def create_input_section(self):
-        self.btn = tk.Button(self.input_frame, text="Get Files and Content", command=self.show_result)
+        self.btn = tk.Button(
+            self.input_frame, text="Get Files and Content", command=self.show_result
+        )
         self.btn.pack(side=tk.LEFT)
 
         dir_label = tk.Label(self.input_frame, text="Directory:")
@@ -157,20 +230,22 @@ class FileContentViewer:
         self.dir_entry = tk.Entry(self.input_frame, width=30)
         self.dir_entry.pack(side=tk.LEFT, padx=(2, 10))
 
-        ext_label = tk.Label(self.input_frame, text="Extensions:")
-        ext_label.pack(side=tk.LEFT)
+        include_label = tk.Label(self.input_frame, text="Include patterns:")
+        include_label.pack(side=tk.LEFT)
 
-        self.ext_entry = tk.Entry(self.input_frame, width=20)
-        self.ext_entry.pack(side=tk.LEFT, padx=(2, 10))
+        self.include_entry = tk.Entry(self.input_frame, width=20)
+        self.include_entry.pack(side=tk.LEFT, padx=(2, 10))
 
-        exclude_label = tk.Label(self.input_frame, text="Exclude:")
+        exclude_label = tk.Label(self.input_frame, text="Exclude patterns:")
         exclude_label.pack(side=tk.LEFT)
 
         self.exclude_entry = tk.Entry(self.input_frame, width=20)
         self.exclude_entry.pack(side=tk.LEFT, padx=(2, 10))
 
         self.gitignore_var = tk.BooleanVar()
-        self.gitignore_check = tk.Checkbutton(self.input_frame, text="Respect .gitignore", variable=self.gitignore_var)
+        self.gitignore_check = tk.Checkbutton(
+            self.input_frame, text="Respect .gitignore", variable=self.gitignore_var
+        )
         self.gitignore_check.pack(side=tk.LEFT, padx=(0, 10))
 
     def create_text_area(self):
@@ -179,11 +254,21 @@ class FileContentViewer:
 
     def show_result(self):
         directory = self.dir_entry.get()
-        extensions = [ext.strip().lstrip("*.") for ext in self.ext_entry.get().split(",")]
-        exclude_files = [file.strip() for file in self.exclude_entry.get().split(",")]
+        include_patterns = [
+            pattern.strip()
+            for pattern in self.include_entry.get().split(",")
+            if pattern.strip()
+        ]
+        exclude_patterns = [
+            pattern.strip()
+            for pattern in self.exclude_entry.get().split(",")
+            if pattern.strip()
+        ]
         respect_gitignore = self.gitignore_var.get()
 
-        result = get_files_and_content(directory, extensions, exclude_files, respect_gitignore)
+        result = get_files_and_content(
+            directory, include_patterns, exclude_patterns, respect_gitignore
+        )
 
         self.text_area.delete(1.0, tk.END)
 
@@ -195,7 +280,9 @@ class FileContentViewer:
             if tag == "title":
                 self.text_area.tag_config(tag, background="lightgray")
 
-        self.settings = save_settings(directory, extensions, exclude_files, respect_gitignore)
+        self.settings = save_settings(
+            directory, include_patterns, exclude_patterns, respect_gitignore
+        )
         self.update_dropdown()
 
     def select_history(self, event):
@@ -205,11 +292,11 @@ class FileContentViewer:
                 self.dir_entry.delete(0, tk.END)
                 self.dir_entry.insert(0, setting["directory"])
 
-                self.ext_entry.delete(0, tk.END)
-                self.ext_entry.insert(0, ", ".join(setting["extensions"]))
+                self.include_entry.delete(0, tk.END)
+                self.include_entry.insert(0, ", ".join(setting["include_patterns"]))
 
                 self.exclude_entry.delete(0, tk.END)
-                self.exclude_entry.insert(0, ", ".join(setting["exclude_files"]))
+                self.exclude_entry.insert(0, ", ".join(setting["exclude_patterns"]))
 
                 self.gitignore_var.set(setting.get("respect_gitignore", False))
 
