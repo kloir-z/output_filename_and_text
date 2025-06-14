@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import scrolledtext, ttk
 from pathlib import Path
 import fnmatch
+import threading
+import time
 
 SETTINGS_FILE = "settings.json"
 HISTORY_LIMIT = 20
@@ -69,30 +71,106 @@ def matches_pattern(filename, patterns, is_exclude=False):
     return False
 
 
-def get_files_and_content(
-    directory, include_patterns, exclude_patterns, respect_gitignore=False
-):
-    output = []
+def should_exclude_directory(path, exclude_dir_patterns):
+    """
+    指定されたパスが除外ディレクトリパターンのいずれかにマッチするかチェックする
+    """
+    if not exclude_dir_patterns:
+        return False
+
+    path_parts = Path(path).parts
+
+    for pattern in exclude_dir_patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+
+        # パターンがワイルドカードを含む場合
+        if any(c in pattern for c in "*?"):
+            for part in path_parts:
+                if fnmatch.fnmatch(part, pattern):
+                    return True
+        # 単純なディレクトリ名の場合
+        else:
+            if pattern in path_parts:
+                return True
+
+    return False
+
+
+def count_files(directory, include_patterns, exclude_patterns, exclude_dir_patterns=None, respect_gitignore=False):
+    """
+    処理対象ファイル数を事前にカウントする
+    """
+    count = 0
     ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
 
     include_patterns = [p.strip() for p in include_patterns if p.strip()]
     exclude_patterns = [p.strip() for p in exclude_patterns if p.strip()]
-
-    print(f"Include patterns: {include_patterns}")
-    print(f"Exclude patterns: {exclude_patterns}")
+    exclude_dir_patterns = [p.strip() for p in (exclude_dir_patterns or []) if p.strip()]
 
     for root, dirs, files in os.walk(directory):
         if ".git" in dirs:
             dirs.remove(".git")
+
+        dirs[:] = [d for d in dirs if not should_exclude_directory(os.path.join(root, d), exclude_dir_patterns)]
 
         for filename in files:
             if filename == ".gitignore":
                 continue
 
             if not matches_pattern(filename, include_patterns, is_exclude=False):
-                print(
-                    f"Skipping {filename} - doesn't match include patterns"
-                )
+                continue
+            if matches_pattern(filename, exclude_patterns, is_exclude=True):
+                continue
+
+            file_path = os.path.join(root, filename)
+            relative_path = os.path.relpath(file_path, directory)
+
+            if should_exclude_directory(os.path.dirname(file_path), exclude_dir_patterns):
+                continue
+
+            if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
+                continue
+
+            count += 1
+
+    return count
+
+
+def get_files_and_content(directory, include_patterns, exclude_patterns, exclude_dir_patterns=None, respect_gitignore=False, progress_callback=None):
+    output = []
+    ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
+
+    include_patterns = [p.strip() for p in include_patterns if p.strip()]
+    exclude_patterns = [p.strip() for p in exclude_patterns if p.strip()]
+    exclude_dir_patterns = [p.strip() for p in (exclude_dir_patterns or []) if p.strip()]
+
+    print(f"Include patterns: {include_patterns}")
+    print(f"Exclude patterns: {exclude_patterns}")
+    print(f"Exclude directory patterns: {exclude_dir_patterns}")
+
+    # ファイル数をカウント
+    if progress_callback:
+        progress_callback("Counting files...", 0, 0)
+        total_files = count_files(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore)
+        processed_files = 0
+    else:
+        total_files = 0
+        processed_files = 0
+
+    for root, dirs, files in os.walk(directory):
+        if ".git" in dirs:
+            dirs.remove(".git")
+
+        dirs[:] = [d for d in dirs if not should_exclude_directory(os.path.join(root, d), exclude_dir_patterns)]
+
+        for filename in files:
+            if filename == ".gitignore":
+                continue
+
+            if not matches_pattern(filename, include_patterns, is_exclude=False):
+                print(f"Skipping {filename} - doesn't match include patterns")
                 continue
             if matches_pattern(filename, exclude_patterns, is_exclude=True):
                 print(f"Skipping {filename} - matches exclude patterns")
@@ -101,13 +179,20 @@ def get_files_and_content(
             file_path = os.path.join(root, filename)
             relative_path = os.path.relpath(file_path, directory)
 
-            if respect_gitignore and should_ignore_file(
-                relative_path, ignored_patterns
-            ):
+            if should_exclude_directory(os.path.dirname(file_path), exclude_dir_patterns):
+                print(f"Skipping {filename} - in excluded directory")
+                continue
+
+            if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
                 print(f"Skipping {filename} - ignored by .gitignore")
                 continue
 
             print(f"Including file: {filename}")
+
+            # 進捗を更新
+            processed_files += 1
+            if progress_callback:
+                progress_callback(f"Reading: {relative_path}", processed_files, total_files)
 
             output.append(("title", "########\n"))
             output.append(("title", f"# {relative_path}\n"))
@@ -118,14 +203,18 @@ def get_files_and_content(
                     output.append(("content", content))
                     output.append(("content", "\n\n"))
             except UnicodeDecodeError:
-                output.append(
-                    ("content", f"[Binary file or encoding error: {relative_path}]\n\n")
-                )
+                output.append(("content", f"[Binary file or encoding error: {relative_path}]\n\n"))
+
+            # 少し待機してUIの更新を促す
+            time.sleep(0.001)
+
+    if progress_callback:
+        progress_callback("Completed!", total_files, total_files)
 
     return output
 
 
-def save_settings(directory, include_patterns, exclude_patterns, respect_gitignore):
+def save_settings(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore):
     """
     設定を保存する
     """
@@ -133,6 +222,7 @@ def save_settings(directory, include_patterns, exclude_patterns, respect_gitigno
         "directory": directory,
         "include_patterns": include_patterns,
         "exclude_patterns": exclude_patterns,
+        "exclude_dir_patterns": exclude_dir_patterns,
         "respect_gitignore": respect_gitignore,
     }
 
@@ -173,10 +263,12 @@ class FileContentViewer:
         self.root = root
         self.root.geometry("1200x800")
         self.settings = load_settings()
+        self.processing = False
 
         self.create_frames()
         self.create_history_section()
         self.create_input_section()
+        self.create_progress_section()
         self.create_text_area()
 
         if self.settings:
@@ -188,6 +280,9 @@ class FileContentViewer:
 
         self.input_frame = tk.Frame(self.root)
         self.input_frame.pack(fill="x", padx=5, pady=5)
+
+        self.progress_frame = tk.Frame(self.root)
+        self.progress_frame.pack(fill="x", padx=5, pady=5)
 
         self.text_frame = tk.Frame(self.root)
         self.text_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -219,57 +314,96 @@ class FileContentViewer:
         )
 
     def create_input_section(self):
-        self.btn = tk.Button(
-            self.input_frame, text="Get Files and Content", command=self.show_result
-        )
+        # 1行目に基本的な入力欄を配置
+        input_row1 = tk.Frame(self.input_frame)
+        input_row1.pack(fill="x", expand=True)
+
+        self.btn = tk.Button(input_row1, text="Get Files and Content", command=self.show_result)
         self.btn.pack(side=tk.LEFT)
 
-        dir_label = tk.Label(self.input_frame, text="Directory:")
+        dir_label = tk.Label(input_row1, text="Directory:")
         dir_label.pack(side=tk.LEFT)
 
-        self.dir_entry = tk.Entry(self.input_frame, width=30)
-        self.dir_entry.pack(side=tk.LEFT, padx=(2, 10))
+        self.dir_entry = tk.Entry(input_row1, width=50)
+        self.dir_entry.pack(side=tk.LEFT, padx=(2, 10), fill="x", expand=True)
 
-        include_label = tk.Label(self.input_frame, text="Include patterns:")
+        # 2行目にフィルタパターン関連の入力欄を配置
+        input_row2 = tk.Frame(self.input_frame)
+        input_row2.pack(fill="x", expand=True, pady=(5, 0))
+
+        include_label = tk.Label(input_row2, text="Include patterns:")
         include_label.pack(side=tk.LEFT)
 
-        self.include_entry = tk.Entry(self.input_frame, width=20)
+        self.include_entry = tk.Entry(input_row2, width=20)
         self.include_entry.pack(side=tk.LEFT, padx=(2, 10))
 
-        exclude_label = tk.Label(self.input_frame, text="Exclude patterns:")
+        exclude_label = tk.Label(input_row2, text="Exclude patterns:")
         exclude_label.pack(side=tk.LEFT)
 
-        self.exclude_entry = tk.Entry(self.input_frame, width=20)
+        self.exclude_entry = tk.Entry(input_row2, width=20)
         self.exclude_entry.pack(side=tk.LEFT, padx=(2, 10))
 
+        # 除外ディレクトリパターン入力欄を追加
+        exclude_dir_label = tk.Label(input_row2, text="Exclude directories:")
+        exclude_dir_label.pack(side=tk.LEFT)
+
+        self.exclude_dir_entry = tk.Entry(input_row2, width=20)
+        self.exclude_dir_entry.pack(side=tk.LEFT, padx=(2, 10))
+
         self.gitignore_var = tk.BooleanVar()
-        self.gitignore_check = tk.Checkbutton(
-            self.input_frame, text="Respect .gitignore", variable=self.gitignore_var
-        )
+        self.gitignore_check = tk.Checkbutton(input_row2, text="Respect .gitignore", variable=self.gitignore_var)
         self.gitignore_check.pack(side=tk.LEFT, padx=(0, 10))
+
+    def create_progress_section(self):
+        # プログレスバー
+        self.progress_bar = ttk.Progressbar(self.progress_frame, mode="determinate", length=400)
+        self.progress_bar.pack(side=tk.LEFT, padx=(0, 10))
+
+        # ステータスラベル
+        self.status_label = tk.Label(self.progress_frame, text="Ready", anchor="w")
+        self.status_label.pack(side=tk.LEFT, fill="x", expand=True)
+
+        # 初期状態では非表示
+        self.progress_frame.pack_forget()
 
     def create_text_area(self):
         self.text_area = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD)
         self.text_area.pack(fill="both", expand=True)
 
-    def show_result(self):
-        directory = self.dir_entry.get()
-        include_patterns = [
-            pattern.strip()
-            for pattern in self.include_entry.get().split(",")
-            if pattern.strip()
-        ]
-        exclude_patterns = [
-            pattern.strip()
-            for pattern in self.exclude_entry.get().split(",")
-            if pattern.strip()
-        ]
-        respect_gitignore = self.gitignore_var.get()
+    def update_progress(self, status, current, total):
+        """
+        プログレスバーとステータスを更新する（メインスレッドで実行）
+        """
 
-        result = get_files_and_content(
-            directory, include_patterns, exclude_patterns, respect_gitignore
-        )
+        def update():
+            if total > 0:
+                progress = (current / total) * 100
+                self.progress_bar["value"] = progress
+                self.status_label.config(text=f"{status} ({current}/{total})")
+            else:
+                self.status_label.config(text=status)
 
+            self.root.update_idletasks()
+
+        self.root.after(0, update)
+
+    def process_files_thread(self, directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore):
+        """
+        ファイル処理を別スレッドで実行
+        """
+        try:
+            result = get_files_and_content(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore, self.update_progress)
+
+            # 結果をメインスレッドで表示
+            self.root.after(0, lambda: self.display_result(result, directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore))
+
+        except Exception as e:
+            self.root.after(0, lambda: self.handle_error(str(e)))
+
+    def display_result(self, result, directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore):
+        """
+        結果をテキストエリアに表示
+        """
         self.text_area.delete(1.0, tk.END)
 
         for tag, content in result:
@@ -280,10 +414,51 @@ class FileContentViewer:
             if tag == "title":
                 self.text_area.tag_config(tag, background="lightgray")
 
-        self.settings = save_settings(
-            directory, include_patterns, exclude_patterns, respect_gitignore
-        )
+        self.settings = save_settings(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore)
         self.update_dropdown()
+
+        # 処理完了後の状態を更新
+        self.processing = False
+        self.btn.config(text="Get Files and Content", state="normal")
+        self.progress_frame.pack_forget()
+
+    def handle_error(self, error_message):
+        """
+        エラーを処理
+        """
+        self.text_area.delete(1.0, tk.END)
+        self.text_area.insert(tk.INSERT, f"Error: {error_message}")
+
+        self.processing = False
+        self.btn.config(text="Get Files and Content", state="normal")
+        self.progress_frame.pack_forget()
+
+    def show_result(self):
+        if self.processing:
+            return
+
+        directory = self.dir_entry.get()
+        if not directory:
+            tk.messagebox.showerror("Error", "Please enter a directory path")
+            return
+
+        include_patterns = [pattern.strip() for pattern in self.include_entry.get().split(",") if pattern.strip()]
+        exclude_patterns = [pattern.strip() for pattern in self.exclude_entry.get().split(",") if pattern.strip()]
+        exclude_dir_patterns = [pattern.strip() for pattern in self.exclude_dir_entry.get().split(",") if pattern.strip()]
+        respect_gitignore = self.gitignore_var.get()
+
+        # 処理開始
+        self.processing = True
+        self.btn.config(text="Processing...", state="disabled")
+        self.progress_frame.pack(fill="x", padx=5, pady=5, before=self.text_frame)
+
+        # プログレスバーをリセット
+        self.progress_bar["value"] = 0
+        self.status_label.config(text="Starting...")
+
+        # 別スレッドで処理を開始
+        thread = threading.Thread(target=self.process_files_thread, args=(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore), daemon=True)
+        thread.start()
 
     def select_history(self, event):
         selected_dir = self.history_var.get()
@@ -297,6 +472,11 @@ class FileContentViewer:
 
                 self.exclude_entry.delete(0, tk.END)
                 self.exclude_entry.insert(0, ", ".join(setting["exclude_patterns"]))
+
+                # 除外ディレクトリパターンの読み込み（旧形式の設定ファイルとの互換性を保持）
+                self.exclude_dir_entry.delete(0, tk.END)
+                if "exclude_dir_patterns" in setting:
+                    self.exclude_dir_entry.insert(0, ", ".join(setting["exclude_dir_patterns"]))
 
                 self.gitignore_var.set(setting.get("respect_gitignore", False))
 
