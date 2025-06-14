@@ -12,8 +12,12 @@ HISTORY_LIMIT = 20
 
 
 def read_gitignore(directory):
+    """
+    .gitignoreファイルを読み込んでパターンを返す（デバッグ版）
+    """
     gitignore_path = os.path.join(directory, ".gitignore")
     if not os.path.exists(gitignore_path):
+        print(f"No .gitignore found at: {gitignore_path}")
         return set()
 
     ignored_patterns = set()
@@ -22,18 +26,61 @@ def read_gitignore(directory):
             line = line.strip()
             if line and not line.startswith("#"):
                 ignored_patterns.add(line)
+
+    print(f"Loaded {len(ignored_patterns)} patterns from .gitignore:")
+    for pattern in list(ignored_patterns)[:10]:  # 最初の10個を表示
+        print(f"  - {pattern}")
+    if len(ignored_patterns) > 10:
+        print(f"  ... and {len(ignored_patterns) - 10} more patterns")
+
     return ignored_patterns
 
 
 def should_ignore_file(file_path, ignored_patterns):
+    """
+    ファイルが.gitignoreパターンにマッチするかチェック（改善版）
+    """
     if not ignored_patterns:
         return False
 
     path = Path(file_path)
 
+    # ファイル名、ディレクトリ名、相対パスのすべてでチェック
+    path_str = str(path).replace("\\", "/")  # Windowsパスを正規化
+    path_parts = path_str.split("/")
+
     for pattern in ignored_patterns:
-        if path.match(pattern) or any(parent.match(pattern) for parent in path.parents):
-            return True
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+
+        # ディレクトリパターン（末尾が/）
+        if pattern.endswith("/"):
+            dir_pattern = pattern.rstrip("/")
+            # パスの任意の部分にディレクトリが含まれているかチェック
+            for i, part in enumerate(path_parts[:-1]):  # 最後の要素（ファイル名）は除外
+                if fnmatch.fnmatch(part, dir_pattern):
+                    return True
+                # サブパスもチェック
+                subpath = "/".join(path_parts[: i + 1])
+                if fnmatch.fnmatch(subpath, dir_pattern):
+                    return True
+
+        # 通常のパターン
+        else:
+            # ファイル名でマッチ
+            if fnmatch.fnmatch(path.name, pattern):
+                return True
+
+            # フルパスでマッチ
+            if fnmatch.fnmatch(path_str, pattern):
+                return True
+
+            # パスの任意の部分でマッチ（node_modules/のようなディレクトリ）
+            for part in path_parts:
+                if fnmatch.fnmatch(part, pattern):
+                    return True
+
     return False
 
 
@@ -71,36 +118,9 @@ def matches_pattern(filename, patterns, is_exclude=False):
     return False
 
 
-def should_exclude_directory(path, exclude_dir_patterns):
-    """
-    指定されたパスが除外ディレクトリパターンのいずれかにマッチするかチェックする
-    """
-    if not exclude_dir_patterns:
-        return False
-
-    path_parts = Path(path).parts
-
-    for pattern in exclude_dir_patterns:
-        pattern = pattern.strip()
-        if not pattern:
-            continue
-
-        # パターンがワイルドカードを含む場合
-        if any(c in pattern for c in "*?"):
-            for part in path_parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-        # 単純なディレクトリ名の場合
-        else:
-            if pattern in path_parts:
-                return True
-
-    return False
-
-
 def count_files(directory, include_patterns, exclude_patterns, exclude_dir_patterns=None, respect_gitignore=False):
     """
-    処理対象ファイル数を事前にカウントする
+    処理対象ファイル数を事前にカウントする（改善版）
     """
     count = 0
     ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
@@ -110,10 +130,21 @@ def count_files(directory, include_patterns, exclude_patterns, exclude_dir_patte
     exclude_dir_patterns = [p.strip() for p in (exclude_dir_patterns or []) if p.strip()]
 
     for root, dirs, files in os.walk(directory):
-        if ".git" in dirs:
-            dirs.remove(".git")
+        # 除外ディレクトリを早期に削除（os.walkが再帰する前に）
+        dirs_to_remove = []
+        for d in dirs:
+            if d == ".git":
+                dirs_to_remove.append(d)
+                continue
 
-        dirs[:] = [d for d in dirs if not should_exclude_directory(os.path.join(root, d), exclude_dir_patterns)]
+            # ディレクトリパスを構築して除外チェック
+            dir_path = os.path.join(root, d)
+            if should_exclude_directory(dir_path, exclude_dir_patterns):
+                dirs_to_remove.append(d)
+
+        # dirsリストから除外ディレクトリを削除（os.walkは残ったディレクトリのみ再帰）
+        for d in dirs_to_remove:
+            dirs.remove(d)
 
         for filename in files:
             if filename == ".gitignore":
@@ -126,9 +157,6 @@ def count_files(directory, include_patterns, exclude_patterns, exclude_dir_patte
 
             file_path = os.path.join(root, filename)
             relative_path = os.path.relpath(file_path, directory)
-
-            if should_exclude_directory(os.path.dirname(file_path), exclude_dir_patterns):
-                continue
 
             if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
                 continue
@@ -139,6 +167,9 @@ def count_files(directory, include_patterns, exclude_patterns, exclude_dir_patte
 
 
 def get_files_and_content(directory, include_patterns, exclude_patterns, exclude_dir_patterns=None, respect_gitignore=False, progress_callback=None):
+    """
+    最適化版：カウントと読み込みを同時に行う
+    """
     output = []
     ignored_patterns = read_gitignore(directory) if respect_gitignore else set()
 
@@ -146,57 +177,102 @@ def get_files_and_content(directory, include_patterns, exclude_patterns, exclude
     exclude_patterns = [p.strip() for p in exclude_patterns if p.strip()]
     exclude_dir_patterns = [p.strip() for p in (exclude_dir_patterns or []) if p.strip()]
 
+    print("\n=== Starting file scan ===")
+    print(f"Directory: {directory}")
     print(f"Include patterns: {include_patterns}")
     print(f"Exclude patterns: {exclude_patterns}")
     print(f"Exclude directory patterns: {exclude_dir_patterns}")
+    print(f"Respect .gitignore: {respect_gitignore}")
 
-    # ファイル数をカウント
+    processed_files = 0
+    skipped_dirs = 0
+
     if progress_callback:
-        progress_callback("Counting files...", 0, 0)
-        total_files = count_files(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore)
-        processed_files = 0
-    else:
-        total_files = 0
-        processed_files = 0
+        progress_callback("Scanning files...", 0, 0)
+
+    start_time = time.time()
 
     for root, dirs, files in os.walk(directory):
-        if ".git" in dirs:
-            dirs.remove(".git")
+        # 現在のディレクトリを表示（デバッグ用）
+        current_dir = os.path.relpath(root, directory)
+        if current_dir != ".":
+            print(f"\nScanning: {current_dir}")
 
-        dirs[:] = [d for d in dirs if not should_exclude_directory(os.path.join(root, d), exclude_dir_patterns)]
+        # .gitignoreのパターンに基づいてディレクトリを除外
+        if respect_gitignore:
+            dirs_to_remove = []
+            for d in dirs[:]:  # コピーを作成してイテレート
+                dir_path = os.path.join(root, d)
+                relative_dir_path = os.path.relpath(dir_path, directory).replace("\\", "/")
 
+                # ディレクトリが.gitignoreパターンにマッチするかチェック
+                should_ignore = False
+                for pattern in ignored_patterns:
+                    if pattern.endswith("/"):
+                        # ディレクトリパターン
+                        if fnmatch.fnmatch(d, pattern.rstrip("/")):
+                            should_ignore = True
+                            break
+                        if fnmatch.fnmatch(relative_dir_path, pattern.rstrip("/")):
+                            should_ignore = True
+                            break
+                    else:
+                        # 通常のパターン（ディレクトリ名でマッチ）
+                        if fnmatch.fnmatch(d, pattern):
+                            should_ignore = True
+                            break
+
+                if should_ignore:
+                    dirs_to_remove.append(d)
+                    skipped_dirs += 1
+                    print(f"  Skipping directory (gitignore): {d}")
+
+            for d in dirs_to_remove:
+                dirs.remove(d)
+
+        # 明示的な除外ディレクトリパターンをチェック
+        dirs_to_remove = []
+        for d in dirs[:]:
+            if d == ".git":
+                dirs_to_remove.append(d)
+                skipped_dirs += 1
+                continue
+
+            dir_path = os.path.join(root, d)
+            if should_exclude_directory(dir_path, exclude_dir_patterns):
+                dirs_to_remove.append(d)
+                skipped_dirs += 1
+                print(f"  Skipping directory (exclude pattern): {d}")
+
+        for d in dirs_to_remove:
+            if d in dirs:
+                dirs.remove(d)
+
+        # ファイル処理
         for filename in files:
             if filename == ".gitignore":
                 continue
 
             if not matches_pattern(filename, include_patterns, is_exclude=False):
-                print(f"Skipping {filename} - doesn't match include patterns")
                 continue
             if matches_pattern(filename, exclude_patterns, is_exclude=True):
-                print(f"Skipping {filename} - matches exclude patterns")
                 continue
 
             file_path = os.path.join(root, filename)
             relative_path = os.path.relpath(file_path, directory)
 
-            if should_exclude_directory(os.path.dirname(file_path), exclude_dir_patterns):
-                print(f"Skipping {filename} - in excluded directory")
-                continue
-
             if respect_gitignore and should_ignore_file(relative_path, ignored_patterns):
-                print(f"Skipping {filename} - ignored by .gitignore")
                 continue
 
-            print(f"Including file: {filename}")
-
-            # 進捗を更新
+            # ファイルを処理
             processed_files += 1
-            if progress_callback:
-                progress_callback(f"Reading: {relative_path}", processed_files, total_files)
+            if progress_callback and processed_files % 10 == 0:  # 10ファイルごとに更新
+                progress_callback(f"Processing: {relative_path}", processed_files, processed_files)
 
             output.append(("title", "########\n"))
             output.append(("title", f"# {relative_path}\n"))
             output.append(("title", "########\n"))
+
             try:
                 with open(file_path, "r", encoding="utf8") as f:
                     content = f.read()
@@ -204,14 +280,58 @@ def get_files_and_content(directory, include_patterns, exclude_patterns, exclude
                     output.append(("content", "\n\n"))
             except UnicodeDecodeError:
                 output.append(("content", f"[Binary file or encoding error: {relative_path}]\n\n"))
+            except Exception as e:
+                output.append(("content", f"[Error reading file: {relative_path} - {str(e)}]\n\n"))
 
-            # 少し待機してUIの更新を促す
-            time.sleep(0.001)
+    elapsed_time = time.time() - start_time
+    print("\n=== Scan completed ===")
+    print(f"Processed files: {processed_files}")
+    print(f"Skipped directories: {skipped_dirs}")
+    print(f"Time elapsed: {elapsed_time:.2f} seconds")
 
     if progress_callback:
-        progress_callback("Completed!", total_files, total_files)
+        progress_callback("Completed!", processed_files, processed_files)
 
     return output
+
+
+def should_exclude_directory(path, exclude_dir_patterns):
+    """
+    指定されたパスが除外ディレクトリパターンのいずれかにマッチするかチェックする（改善版）
+    """
+    if not exclude_dir_patterns:
+        return False
+
+    # パスの各部分を取得
+    path_obj = Path(path)
+    path_parts = path_obj.parts
+
+    # ディレクトリ名のみも取得（最後の部分）
+    dir_name = path_obj.name
+
+    for pattern in exclude_dir_patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+
+        # パターンがワイルドカードを含む場合
+        if any(c in pattern for c in "*?"):
+            # ディレクトリ名だけでマッチング
+            if fnmatch.fnmatch(dir_name, pattern):
+                return True
+            # フルパスでもマッチング
+            if fnmatch.fnmatch(str(path_obj), pattern):
+                return True
+        # 単純なディレクトリ名の場合
+        else:
+            # 完全一致でチェック
+            if pattern == dir_name:
+                return True
+            # パスの任意の部分に含まれているかチェック
+            if pattern in path_parts:
+                return True
+
+    return False
 
 
 def save_settings(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore):
