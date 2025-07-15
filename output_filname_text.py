@@ -434,45 +434,134 @@ class FileContentViewer:
         )
 
     def create_input_section(self):
-        # 1行目に基本的な入力欄を配置
+        # 1行目: ボタンとディレクトリ選択
         input_row1 = tk.Frame(self.input_frame)
         input_row1.pack(fill="x", expand=True)
 
         self.btn = tk.Button(input_row1, text="Get Files and Content", command=self.show_result)
         self.btn.pack(side=tk.LEFT)
 
+        # ディレクトリ選択ボタンを追加
+        self.browse_btn = tk.Button(input_row1, text="Browse...", command=self.browse_directory)
+        self.browse_btn.pack(side=tk.LEFT, padx=(5, 0))
+
         dir_label = tk.Label(input_row1, text="Directory:")
         dir_label.pack(side=tk.LEFT)
 
-        self.dir_entry = tk.Entry(input_row1, width=50)
+        # Textウィジェットを使用（1行表示）
+        self.dir_entry = tk.Text(input_row1, height=1, width=50, undo=True, wrap=tk.NONE)
         self.dir_entry.pack(side=tk.LEFT, padx=(2, 10), fill="x", expand=True)
 
-        # 2行目にフィルタパターン関連の入力欄を配置
+        # 2行目: Include patterns専用行
         input_row2 = tk.Frame(self.input_frame)
         input_row2.pack(fill="x", expand=True, pady=(5, 0))
 
         include_label = tk.Label(input_row2, text="Include patterns:")
         include_label.pack(side=tk.LEFT)
 
-        self.include_entry = tk.Entry(input_row2, width=20)
-        self.include_entry.pack(side=tk.LEFT, padx=(2, 10))
+        self.include_entry = tk.Text(input_row2, height=1, width=50, undo=True, wrap=tk.NONE)
+        self.include_entry.pack(side=tk.LEFT, padx=(2, 10), fill="x", expand=True)
 
-        exclude_label = tk.Label(input_row2, text="Exclude patterns:")
+        # 3行目: Exclude patterns, Exclude directories, .gitignore設定
+        input_row3 = tk.Frame(self.input_frame)
+        input_row3.pack(fill="x", expand=True, pady=(5, 0))
+
+        exclude_label = tk.Label(input_row3, text="Exclude patterns:")
         exclude_label.pack(side=tk.LEFT)
 
-        self.exclude_entry = tk.Entry(input_row2, width=20)
+        self.exclude_entry = tk.Text(input_row3, height=1, width=20, undo=True, wrap=tk.NONE)
         self.exclude_entry.pack(side=tk.LEFT, padx=(2, 10))
 
-        # 除外ディレクトリパターン入力欄を追加
-        exclude_dir_label = tk.Label(input_row2, text="Exclude directories:")
+        exclude_dir_label = tk.Label(input_row3, text="Exclude directories:")
         exclude_dir_label.pack(side=tk.LEFT)
 
-        self.exclude_dir_entry = tk.Entry(input_row2, width=20)
+        self.exclude_dir_entry = tk.Text(input_row3, height=1, width=20, undo=True, wrap=tk.NONE)
         self.exclude_dir_entry.pack(side=tk.LEFT, padx=(2, 10))
 
         self.gitignore_var = tk.BooleanVar()
-        self.gitignore_check = tk.Checkbutton(input_row2, text="Respect .gitignore", variable=self.gitignore_var)
-        self.gitignore_check.pack(side=tk.LEFT, padx=(0, 10))
+        self.gitignore_check = tk.Checkbutton(input_row3, text="Respect .gitignore", variable=self.gitignore_var)
+        self.gitignore_check.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Undo/Redoキーバインドを追加
+        self.setup_text_widgets()
+
+    def setup_text_widgets(self):
+        """Textウィジェットの設定"""
+        text_widgets = [self.dir_entry, self.include_entry, self.exclude_entry, self.exclude_dir_entry]
+
+        for widget in text_widgets:
+            # Undo/Redoキーバインド
+            widget.bind("<Control-z>", lambda e: e.widget.edit_undo())
+            widget.bind("<Control-y>", lambda e: e.widget.edit_redo())
+            widget.bind("<Control-Shift-Z>", lambda e: e.widget.edit_redo())
+
+            # Enterキーで改行しないようにする（Entry風に）
+            widget.bind("<Return>", lambda e: "break")
+            widget.bind("<KP_Enter>", lambda e: "break")
+
+            # Tabキーで次のウィジェットに移動
+            widget.bind("<Tab>", lambda e: e.widget.tk_focusNext().focus())
+            widget.bind("<Shift-Tab>", lambda e: e.widget.tk_focusPrev().focus())
+
+    def browse_directory(self):
+        """ディレクトリ選択ダイアログを表示"""
+        import tkinter.filedialog as filedialog
+
+        directory = filedialog.askdirectory(title="Select Directory", initialdir=self.get_text_value(self.dir_entry) or ".")
+        if directory:
+            self.set_text_value(self.dir_entry, directory)
+
+    def get_text_value(self, text_widget):
+        """Textウィジェットから値を取得（改行を除去）"""
+        return text_widget.get("1.0", "end-1c").strip()
+
+    def set_text_value(self, text_widget, value):
+        """Textウィジェットに値を設定"""
+        text_widget.delete("1.0", tk.END)
+        text_widget.insert("1.0", value)
+
+    def show_result(self):
+        if self.processing:
+            return
+
+        directory = self.get_text_value(self.dir_entry)
+        if not directory:
+            tk.messagebox.showerror("Error", "Please enter a directory path")
+            return
+
+        include_patterns = [pattern.strip() for pattern in self.get_text_value(self.include_entry).split(",") if pattern.strip()]
+        exclude_patterns = [pattern.strip() for pattern in self.get_text_value(self.exclude_entry).split(",") if pattern.strip()]
+        exclude_dir_patterns = [pattern.strip() for pattern in self.get_text_value(self.exclude_dir_entry).split(",") if pattern.strip()]
+        respect_gitignore = self.gitignore_var.get()
+
+        # 処理開始
+        self.processing = True
+        self.btn.config(text="Processing...", state="disabled")
+        self.progress_frame.pack(fill="x", padx=5, pady=5, before=self.text_frame)
+
+        # プログレスバーをリセット
+        self.progress_bar["value"] = 0
+        self.status_label.config(text="Starting...")
+
+        # 別スレッドで処理を開始
+        thread = threading.Thread(target=self.process_files_thread, args=(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore), daemon=True)
+        thread.start()
+
+    def select_history(self, event):
+        selected_dir = self.history_var.get()
+        for setting in self.settings:
+            if setting["directory"] == selected_dir:
+                self.set_text_value(self.dir_entry, setting["directory"])
+                self.set_text_value(self.include_entry, ", ".join(setting["include_patterns"]))
+                self.set_text_value(self.exclude_entry, ", ".join(setting["exclude_patterns"]))
+
+                # 除外ディレクトリパターンの読み込み
+                if "exclude_dir_patterns" in setting:
+                    self.set_text_value(self.exclude_dir_entry, ", ".join(setting["exclude_dir_patterns"]))
+                else:
+                    self.set_text_value(self.exclude_dir_entry, "")
+
+                self.gitignore_var.set(setting.get("respect_gitignore", False))
 
     def create_progress_section(self):
         # プログレスバー
@@ -487,8 +576,54 @@ class FileContentViewer:
         self.progress_frame.pack_forget()
 
     def create_text_area(self):
-        self.text_area = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD)
+        self.text_area = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD, undo=True)
         self.text_area.pack(fill="both", expand=True)
+
+        # テキストエリアにUndo/Redoキーバインドを追加（安全な実装）
+        self.text_area.bind("<Control-z>", lambda e: self.safe_edit_undo())
+        self.text_area.bind("<Control-y>", lambda e: self.safe_edit_redo())
+        self.text_area.bind("<Control-Shift-Z>", lambda e: self.safe_edit_redo())
+
+        # テキストエリア用の右クリックメニューを追加
+        self.add_text_context_menu()
+
+    def safe_edit_undo(self):
+        """安全なUndo操作"""
+        try:
+            self.text_area.edit_undo()
+        except tk.TclError:
+            pass  # Undo履歴がない場合は何もしない
+        return "break"
+
+    def safe_edit_redo(self):
+        """安全なRedo操作"""
+        try:
+            self.text_area.edit_redo()
+        except tk.TclError:
+            pass  # Redo履歴がない場合は何もしない
+        return "break"
+
+    def add_text_context_menu(self):
+        """テキストエリア用の右クリックメニュー"""
+        context_menu = tk.Menu(self.text_area, tearoff=0)
+
+        context_menu.add_command(label="Undo", command=self.safe_edit_undo)
+        context_menu.add_command(label="Redo", command=self.safe_edit_redo)
+        context_menu.add_separator()
+        context_menu.add_command(label="Cut", command=lambda: self.text_area.event_generate("<<Cut>>"))
+        context_menu.add_command(label="Copy", command=lambda: self.text_area.event_generate("<<Copy>>"))
+        context_menu.add_command(label="Paste", command=lambda: self.text_area.event_generate("<<Paste>>"))
+        context_menu.add_separator()
+        context_menu.add_command(label="Select All", command=lambda: self.text_area.tag_add("sel", "1.0", "end"))
+        context_menu.add_command(label="Clear", command=lambda: self.text_area.delete("1.0", tk.END))
+
+        def show_text_context_menu(event):
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                context_menu.grab_release()
+
+        self.text_area.bind("<Button-3>", show_text_context_menu)
 
     def update_progress(self, status, current, total):
         """
@@ -552,53 +687,6 @@ class FileContentViewer:
         self.processing = False
         self.btn.config(text="Get Files and Content", state="normal")
         self.progress_frame.pack_forget()
-
-    def show_result(self):
-        if self.processing:
-            return
-
-        directory = self.dir_entry.get()
-        if not directory:
-            tk.messagebox.showerror("Error", "Please enter a directory path")
-            return
-
-        include_patterns = [pattern.strip() for pattern in self.include_entry.get().split(",") if pattern.strip()]
-        exclude_patterns = [pattern.strip() for pattern in self.exclude_entry.get().split(",") if pattern.strip()]
-        exclude_dir_patterns = [pattern.strip() for pattern in self.exclude_dir_entry.get().split(",") if pattern.strip()]
-        respect_gitignore = self.gitignore_var.get()
-
-        # 処理開始
-        self.processing = True
-        self.btn.config(text="Processing...", state="disabled")
-        self.progress_frame.pack(fill="x", padx=5, pady=5, before=self.text_frame)
-
-        # プログレスバーをリセット
-        self.progress_bar["value"] = 0
-        self.status_label.config(text="Starting...")
-
-        # 別スレッドで処理を開始
-        thread = threading.Thread(target=self.process_files_thread, args=(directory, include_patterns, exclude_patterns, exclude_dir_patterns, respect_gitignore), daemon=True)
-        thread.start()
-
-    def select_history(self, event):
-        selected_dir = self.history_var.get()
-        for setting in self.settings:
-            if setting["directory"] == selected_dir:
-                self.dir_entry.delete(0, tk.END)
-                self.dir_entry.insert(0, setting["directory"])
-
-                self.include_entry.delete(0, tk.END)
-                self.include_entry.insert(0, ", ".join(setting["include_patterns"]))
-
-                self.exclude_entry.delete(0, tk.END)
-                self.exclude_entry.insert(0, ", ".join(setting["exclude_patterns"]))
-
-                # 除外ディレクトリパターンの読み込み（旧形式の設定ファイルとの互換性を保持）
-                self.exclude_dir_entry.delete(0, tk.END)
-                if "exclude_dir_patterns" in setting:
-                    self.exclude_dir_entry.insert(0, ", ".join(setting["exclude_dir_patterns"]))
-
-                self.gitignore_var.set(setting.get("respect_gitignore", False))
 
     def update_dropdown(self):
         if not self.settings:
